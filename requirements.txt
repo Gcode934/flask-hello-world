@@ -1,8 +1,9 @@
+Flask
+Gunicorn
 blinker==1.8.2
 certifi==2024.8.30
 charset-normalizer==3.4.0
 click==8.1.7
-Flask==3.0.3
 Flask-Cors==5.0.0
 idna==3.10
 itsdangerous==2.2.0

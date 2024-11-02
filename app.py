@@ -10,6 +10,7 @@ import uuid
 import logging
 from pydub import AudioSegment
 from pathlib import Path
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 CORS(app)
@@ -26,7 +27,9 @@ AUDIO_DIR = TEMP_DIR / "audio"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 class ProcessingError(Exception):
-    pass
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.status_code = status_code
 
 def extract_video_id(url):
     """Extract YouTube video ID from URL"""
@@ -40,13 +43,16 @@ def extract_video_id(url):
         match = re.search(pattern, url)
         if match:
             return match.group(1)
-    raise ProcessingError("Invalid YouTube URL")
+    raise ProcessingError("Invalid YouTube URL", 400)
 
 def extract_audio_from_youtube(url, output_path):
     """Extract audio from YouTube video"""
     try:
         yt = YouTube(url)
         audio_stream = yt.streams.filter(only_audio=True).first()
+        
+        if not audio_stream:
+            raise ProcessingError("No audio stream available", 400)
         
         # Download audio
         downloaded_file = audio_stream.download(output_path=str(TEMP_DIR))
@@ -62,7 +68,7 @@ def extract_audio_from_youtube(url, output_path):
         return True
     except Exception as e:
         logger.error(f"Error extracting audio: {str(e)}")
-        raise ProcessingError(f"Failed to extract audio: {str(e)}")
+        raise ProcessingError(f"Failed to extract audio: {str(e)}", 500)
 
 def get_youtube_transcription(video_id):
     """Get transcription from YouTube"""
@@ -107,16 +113,43 @@ def get_youtube_transcription(video_id):
         return segments
     except Exception as e:
         logger.error(f"Error getting transcription: {str(e)}")
-        raise ProcessingError(f"Failed to get transcription: {str(e)}")
+        raise ProcessingError(f"Failed to get transcription: {str(e)}", 500)
+
+# Error handlers
+@app.errorhandler(ProcessingError)
+def handle_processing_error(error):
+    response = jsonify({'error': str(error)})
+    response.status_code = error.status_code
+    return response
+
+@app.errorhandler(HTTPException)
+def handle_http_error(error):
+    response = jsonify({'error': error.description})
+    response.status_code = error.code
+    return response
+
+@app.errorhandler(Exception)
+def handle_generic_error(error):
+    logger.error(f"Unexpected error: {str(error)}")
+    response = jsonify({'error': 'Internal server error'})
+    response.status_code = 500
+    return response
+
+# Health check endpoint
+@app.route('/health')
+def health_check():
+    return jsonify({'status': 'healthy'})
 
 @app.route('/process-video', methods=['POST'])
 def process_video():
     try:
         data = request.get_json()
-        video_url = data.get('url')
+        if not data:
+            raise ProcessingError("No JSON data provided", 400)
         
+        video_url = data.get('url')
         if not video_url:
-            return jsonify({'error': 'No URL provided'}), 400
+            raise ProcessingError("No URL provided", 400)
         
         # Extract video ID
         video_id = extract_video_id(video_url)
@@ -141,22 +174,27 @@ def process_video():
         })
         
     except ProcessingError as e:
-        return jsonify({'error': str(e)}), 400
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
+        logger.error(f"Unexpected error in process_video: {str(e)}")
+        raise ProcessingError("Internal server error", 500)
 
 @app.route('/audio/<job_id>', methods=['GET'])
 def get_audio(job_id):
     try:
+        if not re.match(r'^[0-9a-f-]+$', job_id):
+            raise ProcessingError("Invalid job ID format", 400)
+            
         audio_path = AUDIO_DIR / f"{job_id}.mp3"
         if not audio_path.exists():
-            return jsonify({'error': 'Audio file not found'}), 404
+            raise ProcessingError("Audio file not found", 404)
             
         return send_file(str(audio_path), mimetype='audio/mpeg')
+    except ProcessingError as e:
+        raise
     except Exception as e:
         logger.error(f"Error serving audio: {str(e)}")
-        return jsonify({'error': 'Internal server error'}), 500
+        raise ProcessingError("Internal server error", 500)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# if __name__ == '__main__':
+#     app.run(debug=True)
