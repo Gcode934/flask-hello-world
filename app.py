@@ -1,87 +1,64 @@
 # app.py
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from pytube import YouTube
+import subprocess
 from youtube_transcript_api import YouTubeTranscriptApi
-import re
+import json
 import os
-import tempfile
-import uuid
-import logging
-from pydub import AudioSegment
 from pathlib import Path
-from werkzeug.exceptions import HTTPException
+import uuid
 
 app = Flask(__name__)
 CORS(app)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Create directory for storing audio files
+AUDIO_DIR = Path("audio_files")
+AUDIO_DIR.mkdir(exist_ok=True)
 
-# Create temporary directories for storing files
-TEMP_DIR = Path(tempfile.gettempdir()) / "language_learning_app"
-AUDIO_DIR = TEMP_DIR / "audio"
-
-# Create directories if they don't exist
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-
-class ProcessingError(Exception):
-    def __init__(self, message, status_code=400):
-        super().__init__(message)
-        self.status_code = status_code
-
-def extract_video_id(url):
-    """Extract YouTube video ID from URL"""
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:embed\/)([0-9A-Za-z_-]{11})',
-        r'(?:youtu\.be\/)([0-9A-Za-z_-]{11})'
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ProcessingError("Invalid YouTube URL", 400)
-
-def extract_audio_from_youtube(url, output_path):
-    """Extract audio from YouTube video"""
+def download_audio(url, output_filename):
+    """
+    Download audio from YouTube video using yt-dlp
+    """
     try:
-        yt = YouTube(url)
-        audio_stream = yt.streams.filter(only_audio=True).first()
+        # Download audio using yt-dlp
+        process = subprocess.run([
+            'yt-dlp',
+            '-f', 'bestaudio/best',     # Download best audio format
+            '--extract-audio',           # Extract audio only
+            '--audio-format', 'mp3',     # Convert to mp3
+            '--audio-quality', '0',      # Best quality
+            '-o', output_filename,       # Output filename
+            url
+        ], capture_output=True, text=True)
         
-        if not audio_stream:
-            raise ProcessingError("No audio stream available", 400)
-        
-        # Download audio
-        downloaded_file = audio_stream.download(output_path=str(TEMP_DIR))
-        temp_path = Path(downloaded_file)
-        
-        # Convert to mp3
-        audio = AudioSegment.from_file(temp_path)
-        audio.export(output_path, format="mp3")
-        
-        # Clean up temporary file
-        temp_path.unlink(missing_ok=True)
-        
+        # Check if the process was successful
+        if process.returncode != 0:
+            raise Exception(f"yt-dlp error: {process.stderr}")
+            
         return True
+            
     except Exception as e:
-        logger.error(f"Error extracting audio: {str(e)}")
-        raise ProcessingError(f"Failed to extract audio: {str(e)}", 500)
+        print(f"Error downloading audio: {str(e)}")
+        return False
 
-def get_youtube_transcription(video_id):
-    """Get transcription from YouTube"""
+def get_transcript(video_url, language='en'):
+    """
+    Get transcription from YouTube video
+    """
     try:
-        transcript_list = YouTubeTranscriptApi.get_transcript(
-            video_id,
-            languages=['en']  # You can modify this to support other languages
-        )
+        # Extract video ID from URL
+        if "youtu.be" in video_url:
+            video_id = video_url.split("/")[-1]
+        else:
+            video_id = video_url.split("v=")[1].split("&")[0]
         
-        # Process transcript into segments
+        # Get transcript
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[language])
+        
+        # Process transcript
         segments = []
         for item in transcript_list:
-            # Split text into words and calculate approximate word timings
+            # Split text into words
             words = item['text'].split()
             duration = item['duration']
             start = item['start']
@@ -111,90 +88,89 @@ def get_youtube_transcription(video_id):
             segments.append(segment)
         
         return segments
+        
     except Exception as e:
-        logger.error(f"Error getting transcription: {str(e)}")
-        raise ProcessingError(f"Failed to get transcription: {str(e)}", 500)
+        print(f"Error getting transcript: {str(e)}")
+        return None
 
-# Error handlers
-@app.errorhandler(ProcessingError)
-def handle_processing_error(error):
-    response = jsonify({'error': str(error)})
-    response.status_code = error.status_code
-    return response
-
-@app.errorhandler(HTTPException)
-def handle_http_error(error):
-    response = jsonify({'error': error.description})
-    response.status_code = error.code
-    return response
-
-@app.errorhandler(Exception)
-def handle_generic_error(error):
-    logger.error(f"Unexpected error: {str(error)}")
-    response = jsonify({'error': 'Internal server error'})
-    response.status_code = 500
-    return response
-
-# Health check endpoint
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health_check():
+    """Health check endpoint"""
     return jsonify({'status': 'healthy'})
 
 @app.route('/process-video', methods=['POST'])
 def process_video():
+    """Process YouTube video: download audio and get transcript"""
     try:
         data = request.get_json()
-        if not data:
-            raise ProcessingError("No JSON data provided", 400)
+        if not data or 'url' not in data:
+            return jsonify({'error': 'No URL provided'}), 400
+            
+        video_url = data['url']
+        language = data.get('language', 'en')  # Default to English if not specified
         
-        video_url = data.get('url')
-        if not video_url:
-            raise ProcessingError("No URL provided", 400)
-        
-        # Extract video ID
-        video_id = extract_video_id(video_url)
-        
-        # Generate unique ID for this processing job
+        # Generate unique ID for this request
         job_id = str(uuid.uuid4())
+        output_filename = AUDIO_DIR / f"{job_id}.mp3"
         
-        # Create path for audio file
-        audio_path = AUDIO_DIR / f"{job_id}.mp3"
-        
-        # Get transcription from YouTube
-        segments = get_youtube_transcription(video_id)
-        
-        # Extract audio from YouTube
-        extract_audio_from_youtube(video_url, str(audio_path))
-        
+        # Download audio
+        audio_success = download_audio(video_url, str(output_filename))
+        if not audio_success:
+            return jsonify({'error': 'Failed to download audio'}), 500
+            
+        # Get transcript
+        transcript = get_transcript(video_url, language)
+        if transcript is None:
+            return jsonify({'error': 'Failed to get transcript'}), 500
+            
         return jsonify({
             'job_id': job_id,
-            'message': 'Processing completed',
+            'message': 'Processing completed successfully',
             'audio_url': f'/audio/{job_id}',
-            'transcription': segments
+            'transcript': transcript
         })
         
-    except ProcessingError as e:
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error in process_video: {str(e)}")
-        raise ProcessingError("Internal server error", 500)
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/audio/<job_id>', methods=['GET'])
 def get_audio(job_id):
+    """Serve audio file"""
     try:
-        if not re.match(r'^[0-9a-f-]+$', job_id):
-            raise ProcessingError("Invalid job ID format", 400)
+        # Validate job_id format
+        if not job_id or not job_id.replace('-', '').isalnum():
+            return jsonify({'error': 'Invalid job ID'}), 400
             
         audio_path = AUDIO_DIR / f"{job_id}.mp3"
+        
         if not audio_path.exists():
-            raise ProcessingError("Audio file not found", 404)
+            return jsonify({'error': 'Audio file not found'}), 404
             
         return send_file(str(audio_path), mimetype='audio/mpeg')
-    except ProcessingError as e:
-        raise
+        
     except Exception as e:
-        logger.error(f"Error serving audio: {str(e)}")
-        raise ProcessingError("Internal server error", 500)
+        return jsonify({'error': str(e)}), 500
 
-# if __name__ == '__main__':
-#     app.run(debug=True)
+# Optional: Cleanup endpoint to remove old files
+@app.route('/cleanup', methods=['POST'])
+def cleanup():
+    """Remove old audio files"""
+    try:
+        # Remove files older than 24 hours
+        cleanup_age = 24 * 3600  # 24 hours in seconds
+        current_time = time.time()
+        deleted_count = 0
+        
+        for file in AUDIO_DIR.glob('*.mp3'):
+            if current_time - file.stat().st_mtime > cleanup_age:
+                file.unlink()
+                deleted_count += 1
+                
+        return jsonify({
+            'message': f'Cleanup completed. Removed {deleted_count} files.',
+            'files_removed': deleted_count
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
