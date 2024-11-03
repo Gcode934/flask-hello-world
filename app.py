@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify, Response
 from pytubefix import YouTube
-from pytubefix.innertube import InnerTube
 from pytubefix.cli import on_progress
 from pydub import AudioSegment
 import io
@@ -17,17 +16,8 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-class CustomInnerTube(InnerTube):
-    def __init__(self, visitor_data, po_token, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._visitor_data = visitor_data
-        self._po_token = po_token
-        
-    def fetch_po_token(self):
-        logger.debug("Using provided tokens instead of interactive input")
-        self.access_visitorData = self._visitor_data
-        self.access_po_token = self._po_token
-        return self._visitor_data, self._po_token
+# Specify the path for the token file
+TOKEN_FILE = os.path.abspath('tokens.json')
 
 @app.route('/stream_audio', methods=['POST'])
 def stream_audio():
@@ -47,22 +37,37 @@ def stream_audio():
         return jsonify({"error": "URL, visitorData, and po_token must be provided"}), 400
 
     try:
-        # Create custom innertube instance
-        innertube = CustomInnerTube(
-            visitor_data=visitor_data,
-            po_token=po_token,
-            client='WEB',
-            use_oauth=False,
-            allow_cache=False
-        )
-
-        # Initialize YouTube with custom innertube
-        logger.info("Initializing YouTube object")
-        yt = YouTube(url)
-        yt.innertube_client = innertube
+        # Save tokens to file with the exact structure expected by InnerTube
+        token_data = {
+            "access_token": None,
+            "refresh_token": None,
+            "expires": None,
+            "visitorData": visitor_data,
+            "po_token": po_token
+        }
         
-        logger.info("Fetching video details...")
-        title = yt.title  # This will use our custom token handling
+        logger.debug(f"Writing token file to: {TOKEN_FILE}")
+        logger.debug(f"Token data: {json.dumps(token_data, indent=2)}")
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+        
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump(token_data, f, indent=2)
+
+        # Initialize YouTube with correct parameters
+        logger.info("Initializing YouTube object")
+        yt = YouTube(
+            url,
+            token_file=TOKEN_FILE,
+            use_oauth=False,
+            use_po_token=True,
+            allow_cache=True,
+            client='WEB'  # Use WEB client instead of default ANDROID
+        )
+        
+        logger.info("Fetching video info...")
+        title = yt.title
         logger.info(f"Video title: {title}")
 
         # Get the audio stream
@@ -96,3 +101,4 @@ def stream_audio():
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
