@@ -62,8 +62,7 @@ def stream_audio():
             token_file=TOKEN_FILE,
             use_oauth=False,
             use_po_token=True,
-            allow_cache=True,
-            client='WEB'  # Use WEB client instead of default ANDROID
+            on_progress_callback=on_progress
         )
         
         logger.info("Fetching video info...")
@@ -101,4 +100,3 @@ def stream_audio():
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
-
