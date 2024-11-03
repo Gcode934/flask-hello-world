@@ -25,7 +25,7 @@ def stream_audio():
     with open(TOKEN_FILE, 'w') as f:
         json.dump({
             'visitorData': visitor_data,
-            'po_token': po_token
+            'poToken': po_token
         }, f)
 
     try:
